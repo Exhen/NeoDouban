@@ -19,7 +19,7 @@ def zip_dir(input_path, output_file):
 if __name__ == "__main__":
     input_path = "src"
     out_path = "out"
-    output_file = out_path + "/NewDouban.zip"
+    output_file = out_path + "/NeoDouban.zip"
     if os.path.exists(out_path):
         print('clean path %s' % out_path)
         shutil.rmtree(out_path)
