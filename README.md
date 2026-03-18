@@ -32,7 +32,7 @@
 3. 在 `首选项 -> 外观 -> 工具栏` 中，将 `Douban` 按钮加入主界面工具栏。
 
 也可以直接从 Release 页面下载编译好的 ZIP 包：  
-[NeoDouban.zip](https://github.com/fugary/calibre-douban/releases/latest/download/NeoDouban.zip)
+[NeoDouban.zip](https://github.com/Exhen/NeoDouban/releases/latest/download/NeoDouban.zip)
 
 ---
 

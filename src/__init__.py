@@ -394,6 +394,8 @@ class DoubanActionBase(InterfaceActionBase):
         cw.cb_fill_title.setChecked(not default_fields or 'title' in default_fields)
         cw.cb_fill_authors = QCheckBox('作者', cw)
         cw.cb_fill_authors.setChecked(not default_fields or 'authors' in default_fields)
+        cw.cb_fill_comments = QCheckBox('简介', cw)
+        cw.cb_fill_comments.setChecked(not default_fields or 'comments' in default_fields)
         cw.cb_fill_series = QCheckBox('系列', cw)
         cw.cb_fill_series.setChecked(not default_fields or 'series' in default_fields)
         cw.cb_fill_tags = QCheckBox('标签', cw)
@@ -416,13 +418,14 @@ class DoubanActionBase(InterfaceActionBase):
         grid.addWidget(cw.cb_replace_cover_default, 1, 0)
         grid.addWidget(cw.cb_fill_title, 2, 0)
         grid.addWidget(cw.cb_fill_authors, 3, 0)
-        grid.addWidget(cw.cb_fill_series, 1, 1)
-        grid.addWidget(cw.cb_fill_tags, 2, 1)
-        grid.addWidget(cw.cb_fill_publisher, 3, 1)
-        grid.addWidget(cw.cb_fill_rating, 1, 2)
-        grid.addWidget(cw.cb_fill_custom_rating, 2, 2)
-        grid.addWidget(cw.cb_fill_custom_rating_count, 3, 2)
-        grid.addWidget(cw.cb_fill_translator, 1, 3)
+        grid.addWidget(cw.cb_fill_comments, 1, 1)
+        grid.addWidget(cw.cb_fill_series, 2, 1)
+        grid.addWidget(cw.cb_fill_tags, 3, 1)
+        grid.addWidget(cw.cb_fill_publisher, 1, 2)
+        grid.addWidget(cw.cb_fill_rating, 2, 2)
+        grid.addWidget(cw.cb_fill_custom_rating, 3, 2)
+        grid.addWidget(cw.cb_fill_custom_rating_count, 1, 3)
+        grid.addWidget(cw.cb_fill_translator, 2, 3)
         cw.l.addLayout(grid)
 
         # 给设置对话框一个合适的默认大小
@@ -466,6 +469,8 @@ class DoubanActionBase(InterfaceActionBase):
             fields.append('custom_rating_count')
         if config_widget.cb_fill_translator.isChecked():
             fields.append('custom_translator')
+        if config_widget.cb_fill_comments.isChecked():
+            fields.append('comments')
         self.prefs['default_fill_fields'] = fields
 
 
@@ -677,7 +682,8 @@ class DoubanAction(InterfaceAction):
         default_fields = set(self.prefs.get('default_fill_fields') or [])
         all_ids = {
             'title', 'authors', 'series', 'tags', 'publisher',
-            'rating', 'custom_rating', 'custom_rating_count', 'custom_translator'
+            'rating', 'comments',
+            'custom_rating', 'custom_rating_count', 'custom_translator'
         }
         if not default_fields:
             default_fields = all_ids
@@ -737,6 +743,8 @@ class DoubanAction(InterfaceAction):
                     new_mi.publisher = mi.publisher
                 if 'rating' not in selected:
                     new_mi.rating = getattr(mi, 'rating', None)
+                if 'comments' not in selected:
+                    new_mi.comments = getattr(mi, 'comments', None)
 
             # 4. 写回标准字段
             db_api.set_metadata(book_id, new_mi)
@@ -939,6 +947,7 @@ class DoubanAction(InterfaceAction):
             ('tags', '标签', _to_str(old_mi.tags), _to_str(new_mi.tags)),
             ('publisher', '出版社', _to_str(old_mi.publisher), _to_str(new_mi.publisher)),
             ('rating', '评分', _to_str(getattr(old_mi, 'rating', None)), _to_str(new_rating_val)),
+            ('comments', '简介', _to_str(getattr(old_mi, 'comments', None)), _to_str(getattr(new_mi, 'comments', None))),
             ('custom_rating', f'自定义列 {col_key}', _to_str(old_custom), _to_str(new_custom_val)),
         ]
 
@@ -1101,7 +1110,7 @@ class DoubanAction(InterfaceAction):
             lbl_old_cover.setText('当前已有封面' if has_old_cover else '当前无封面')
 
         # 设置一个合适的默认对话框尺寸，并允许根据内容伸缩
-        dlg.resize(800, 420)
+        dlg.resize(800, 800)
 
         btn_box = QHBoxLayout()
         btn_ok = QPushButton('应用此更改', dlg)
@@ -1153,6 +1162,8 @@ class DoubanAction(InterfaceAction):
                 new_mi.publisher = old_mi.publisher
             if 'rating' not in selected:
                 new_mi.rating = getattr(old_mi, 'rating', None)
+            if 'comments' not in selected:
+                new_mi.comments = getattr(old_mi, 'comments', None)
 
             # 自定义评分列
             self._apply_rating_custom = 'custom_rating' in selected
