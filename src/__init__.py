@@ -34,12 +34,16 @@ PROVIDER_AUTHOR = 'exhen'
 
 class DoubanBookSearcher:
 
-    def __init__(self, max_workers, douban_delay_enable, douban_login_cookie):
+    def __init__(self, max_workers, douban_delay_enable, douban_login_cookie, delay_min_sec=3.0, delay_max_sec=5.0):
         self.book_parser = DoubanBookHtmlParser()
         self.max_workers = max_workers
         self.thread_pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='douban_async')
         self.douban_delay_enable = douban_delay_enable
-        self.douban_login_cookie = douban_login_cookie
+        self.douban_login_cookie = (douban_login_cookie or '').strip()
+        self.delay_min_sec = float(delay_min_sec)
+        self.delay_max_sec = float(delay_max_sec)
+        # 由动作层在运行前注入；静默模式下按“每次请求后”延时
+        self.silent_mode = False
 
     def calc_url(self, href):
         query = urlparse(href).query
@@ -49,12 +53,14 @@ class DoubanBookSearcher:
             return url
 
     def load_book_urls_new(self, query, log):
-        if self.douban_delay_enable:
+        if self.douban_delay_enable and not self.silent_mode:
             self.random_sleep(log)
         params = {"cat": DOUBAN_BOOK_CAT, "q": query}
         url = DOUBAN_SEARCH_URL + "?" + urlencode(params)
         log.info(f'Load books by search url: {url}')
         res = urlopen(Request(url, headers=self.get_headers(), method='GET'))
+        if self.douban_delay_enable and self.silent_mode:
+            self.random_sleep(log)
         book_urls = []
         if res.status in [200, 201]:
             html_content = self.get_res_content(res)
@@ -83,9 +89,11 @@ class DoubanBookSearcher:
     def load_book(self, url, log):
         book = None
         start_time = time.time()
-        if self.douban_delay_enable:
+        if self.douban_delay_enable and not self.silent_mode:
             self.random_sleep(log)
         res = urlopen(Request(url, headers=self.get_headers(), method='GET'))
+        if self.douban_delay_enable and self.silent_mode:
+            self.random_sleep(log)
         if res.status in [200, 201]:
             book_detail_content = self.get_res_content(res)
             if self.is_prohibited(book_detail_content, log):
@@ -120,12 +128,19 @@ class DoubanBookSearcher:
 
     def get_headers(self):
         headers = {'User-Agent': random_user_agent(), 'Accept-Encoding': 'gzip, deflate'}
-        if self.douban_login_cookie:
-            headers['Cookie'] = self.douban_login_cookie
+        cookie = (self.douban_login_cookie or '').strip()
+        if cookie:
+            headers['Cookie'] = cookie
         return headers
 
     def random_sleep(self, log):
-        random_sec = random.random() / 10
+        min_sec = float(getattr(self, 'delay_min_sec', 3.0))
+        max_sec = float(getattr(self, 'delay_max_sec', 5.0))
+        if min_sec < 0:
+            min_sec = 0.0
+        if max_sec < min_sec:
+            min_sec, max_sec = max_sec, min_sec
+        random_sec = random.uniform(min_sec, max_sec)
         log.info("Random sleep time {}s".format(random_sec))
         time.sleep(random_sec)
 
@@ -270,6 +285,8 @@ class DoubanActionBase(InterfaceActionBase):
             self._prefs.setdefault('douban_concurrency_size', DOUBAN_CONCURRENCY_SIZE)
             self._prefs.setdefault('add_translator_to_author', True)
             self._prefs.setdefault('douban_delay_enable', True)
+            self._prefs.setdefault('douban_delay_min_sec', 3.0)
+            self._prefs.setdefault('douban_delay_max_sec', 5.0)
             self._prefs.setdefault('douban_search_with_author', True)
             self._prefs.setdefault('douban_login_cookie', '')
             self._prefs.setdefault('rating_custom_column', '')
@@ -287,7 +304,7 @@ class DoubanActionBase(InterfaceActionBase):
 
     # --- 配置界面（在“插件 → 配置”里打开） ---
     def config_widget(self):
-        from qt.core import QWidget, QVBoxLayout, QFormLayout, QSpinBox, QCheckBox, QLineEdit, QComboBox, QLabel
+        from qt.core import QWidget, QVBoxLayout, QFormLayout, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QComboBox, QLabel
 
         cw = QWidget()
         cw.l = QVBoxLayout(cw)
@@ -304,6 +321,20 @@ class DoubanActionBase(InterfaceActionBase):
         cb_delay = QCheckBox('启用随机延迟', cw)
         cb_delay.setChecked(bool(self.prefs.get('douban_delay_enable')))
         form.addRow(cb_delay)
+        spin_delay_min = QDoubleSpinBox(cw)
+        spin_delay_min.setRange(0.0, 30.0)
+        spin_delay_min.setSingleStep(0.5)
+        spin_delay_min.setDecimals(1)
+        spin_delay_min.setSuffix(' s')
+        spin_delay_min.setValue(float(self.prefs.get('douban_delay_min_sec', 3.0)))
+        form.addRow(QLabel('随机延迟最小值'), spin_delay_min)
+        spin_delay_max = QDoubleSpinBox(cw)
+        spin_delay_max.setRange(0.0, 30.0)
+        spin_delay_max.setSingleStep(0.5)
+        spin_delay_max.setDecimals(1)
+        spin_delay_max.setSuffix(' s')
+        spin_delay_max.setValue(float(self.prefs.get('douban_delay_max_sec', 5.0)))
+        form.addRow(QLabel('随机延迟最大值'), spin_delay_max)
 
         # 检索时附带作者
         cb_with_author = QCheckBox('检索时附带作者', cw)
@@ -379,6 +410,8 @@ class DoubanActionBase(InterfaceActionBase):
         # 把控件挂到 widget 上，供 save_settings 读取
         cw.spin_conc = spin_conc
         cw.cb_delay = cb_delay
+        cw.spin_delay_min = spin_delay_min
+        cw.spin_delay_max = spin_delay_max
         cw.cb_with_author = cb_with_author
         cw.cb_add_trans = cb_add_trans
         cw.le_cookie = le_cookie
@@ -439,6 +472,12 @@ class DoubanActionBase(InterfaceActionBase):
         # 保存配置到 JSONConfig
         self.prefs['douban_concurrency_size'] = int(config_widget.spin_conc.value())
         self.prefs['douban_delay_enable'] = bool(config_widget.cb_delay.isChecked())
+        delay_min_sec = float(config_widget.spin_delay_min.value())
+        delay_max_sec = float(config_widget.spin_delay_max.value())
+        if delay_max_sec < delay_min_sec:
+            delay_min_sec, delay_max_sec = delay_max_sec, delay_min_sec
+        self.prefs['douban_delay_min_sec'] = delay_min_sec
+        self.prefs['douban_delay_max_sec'] = delay_max_sec
         self.prefs['douban_search_with_author'] = bool(config_widget.cb_with_author.isChecked())
         self.prefs['add_translator_to_author'] = bool(config_widget.cb_add_trans.isChecked())
         self.prefs['douban_login_cookie'] = config_widget.le_cookie.text().strip()
@@ -548,9 +587,14 @@ class DoubanAction(InterfaceAction):
         # 初始化抓取器
         concurrency_size = int(self.prefs.get('douban_concurrency_size', DOUBAN_CONCURRENCY_SIZE))
         douban_delay_enable = bool(self.prefs.get('douban_delay_enable', True))
+        douban_delay_min_sec = float(self.prefs.get('douban_delay_min_sec', 3.0))
+        douban_delay_max_sec = float(self.prefs.get('douban_delay_max_sec', 5.0))
         douban_login_cookie = self.prefs.get('douban_login_cookie', None)
         self.douban_search_with_author = bool(self.prefs.get('douban_search_with_author', True))
-        self.book_searcher = DoubanBookSearcher(concurrency_size, douban_delay_enable, douban_login_cookie)
+        self.book_searcher = DoubanBookSearcher(
+            concurrency_size, douban_delay_enable, douban_login_cookie,
+            douban_delay_min_sec, douban_delay_max_sec
+        )
 
         # 解析评分目标列配置
         rating_col = self.prefs.get('rating_custom_column') or ''
@@ -661,8 +705,17 @@ class DoubanAction(InterfaceAction):
                 self.info(_('当前 Calibre 版本不支持 new_api 接口，无法写入自定义列。'))
             return
 
+        # 每次运行前同步最新设置，确保 cookie/延时配置即时生效
+        if self.book_searcher is not None:
+            self.book_searcher.douban_login_cookie = (self.prefs.get('douban_login_cookie', '') or '').strip()
+            self.book_searcher.douban_delay_enable = bool(self.prefs.get('douban_delay_enable', True))
+            self.book_searcher.delay_min_sec = float(self.prefs.get('douban_delay_min_sec', 3.0))
+            self.book_searcher.delay_max_sec = float(self.prefs.get('douban_delay_max_sec', 5.0))
+
         progress_dlg = None
         self._silent_mode = not with_check
+        if self.book_searcher is not None:
+            self.book_searcher.silent_mode = self._silent_mode
         if self._silent_mode and len(ids) > 1:
             progress_dlg = QProgressDialog(_('正在批量更新豆瓣元数据...'), '', 0, len(ids), gui)
             progress_dlg.setWindowTitle(_('Douban metadata'))
@@ -685,10 +738,6 @@ class DoubanAction(InterfaceAction):
                         )
                         progress_dlg.setValue(idx)
                         QApplication.processEvents()
-                    # 批量模式下在每本书之间加入随机延迟，降低限流风险
-                    if len(ids) > 1 and idx > 0 and bool(self.prefs.get('douban_delay_enable', True)):
-                        delay_sec = 0.2 + random.random() * 0.8
-                        time.sleep(delay_sec)
                     self._update_one_book(new_api, book_id,
                                           col_key, col_dtype,
                                           col_count_key, col_count_dtype,
@@ -707,6 +756,8 @@ class DoubanAction(InterfaceAction):
                 progress_dlg.setValue(len(ids))
                 progress_dlg.close()
             self._silent_mode = False
+            if self.book_searcher is not None:
+                self.book_searcher.silent_mode = False
 
         if with_check:
             info_dialog(gui, _('Douban metadata'),
