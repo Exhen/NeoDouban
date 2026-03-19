@@ -49,6 +49,8 @@ class DoubanBookSearcher:
             return url
 
     def load_book_urls_new(self, query, log):
+        if self.douban_delay_enable:
+            self.random_sleep(log)
         params = {"cat": DOUBAN_BOOK_CAT, "q": query}
         url = DOUBAN_SEARCH_URL + "?" + urlencode(params)
         log.info(f'Load books by search url: {url}')
@@ -493,6 +495,8 @@ class DoubanAction(InterfaceAction):
         self.book_searcher = None
         self._rating_custom_column_key = ''
         self._rating_custom_column_datatype = ''
+        # 不检查模式下开启静默，避免弹出任何对话框，便于批量处理
+        self._silent_mode = False
 
     @property
     def prefs(self):
@@ -617,20 +621,27 @@ class DoubanAction(InterfaceAction):
 
     # --- 主动作 ---
     def _run_update(self, with_check):
+        from qt.core import QProgressDialog, QApplication, Qt
         gui = self.gui
         db = gui.current_db
         ids = list(gui.library_view.get_selected_ids())
         if not ids:
-            info_dialog(gui, _('Douban metadata'),
-                        _('请先在书库中选择至少一本书。'), show=True)
+            if with_check:
+                info_dialog(gui, _('Douban metadata'),
+                            _('请先在书库中选择至少一本书。'), show=True)
+            else:
+                self.info(_('请先在书库中选择至少一本书。'))
             return
 
         col_key = self._rating_custom_column_key
         col_dtype = self._rating_custom_column_datatype
         if not col_key:
-            error_dialog(gui, _('Douban metadata'),
-                         _('尚未在插件设置中选择用于保存评分的自定义列。'),
-                         show=True)
+            if with_check:
+                error_dialog(gui, _('Douban metadata'),
+                             _('尚未在插件设置中选择用于保存评分的自定义列。'),
+                             show=True)
+            else:
+                self.info(_('尚未在插件设置中选择用于保存评分的自定义列。'))
             return
 
         col_count_key = getattr(self, '_rating_count_column_key', '')
@@ -642,26 +653,66 @@ class DoubanAction(InterfaceAction):
 
         new_api = getattr(db, 'new_api', None)
         if new_api is None:
-            error_dialog(gui, _('Douban metadata'),
-                         _('当前 Calibre 版本不支持 new_api 接口，无法写入自定义列。'),
-                         show=True)
+            if with_check:
+                error_dialog(gui, _('Douban metadata'),
+                             _('当前 Calibre 版本不支持 new_api 接口，无法写入自定义列。'),
+                             show=True)
+            else:
+                self.info(_('当前 Calibre 版本不支持 new_api 接口，无法写入自定义列。'))
             return
 
-        for book_id in ids:
-            try:
-                self._update_one_book(new_api, book_id,
-                                      col_key, col_dtype,
-                                      col_count_key, col_count_dtype,
-                                      col_trans_key, col_trans_dtype,
-                                      add_translator_to_author, with_check)
-            except Exception as e:
-                # 老版本 GUI 没有 print_error，直接弹错误对话框并继续处理后续图书
-                error_dialog(gui, _('Douban metadata'),
-                             f'Douban update failed for book {book_id}: {e}',
-                             show=True)
+        progress_dlg = None
+        self._silent_mode = not with_check
+        if self._silent_mode and len(ids) > 1:
+            progress_dlg = QProgressDialog(_('正在批量更新豆瓣元数据...'), '', 0, len(ids), gui)
+            progress_dlg.setWindowTitle(_('Douban metadata'))
+            progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+            progress_dlg.setMinimumDuration(0)
+            progress_dlg.setAutoClose(True)
+            progress_dlg.setAutoReset(True)
+            # 静默模式只展示进度，不提供取消，避免中途状态不一致
+            progress_dlg.setCancelButton(None)
+            progress_dlg.setValue(0)
+            progress_dlg.show()
+            QApplication.processEvents()
 
-        info_dialog(gui, _('Douban metadata'),
-                    _('豆瓣元数据更新完成。'), show=True)
+        try:
+            for idx, book_id in enumerate(ids):
+                try:
+                    if progress_dlg is not None:
+                        progress_dlg.setLabelText(
+                            _('正在处理第 {}/{} 本（ID: {}）').format(idx + 1, len(ids), book_id)
+                        )
+                        progress_dlg.setValue(idx)
+                        QApplication.processEvents()
+                    # 批量模式下在每本书之间加入随机延迟，降低限流风险
+                    if len(ids) > 1 and idx > 0 and bool(self.prefs.get('douban_delay_enable', True)):
+                        delay_sec = 0.2 + random.random() * 0.8
+                        time.sleep(delay_sec)
+                    self._update_one_book(new_api, book_id,
+                                          col_key, col_dtype,
+                                          col_count_key, col_count_dtype,
+                                          col_trans_key, col_trans_dtype,
+                                          add_translator_to_author, with_check)
+                except Exception as e:
+                    if with_check:
+                        # 老版本 GUI 没有 print_error，直接弹错误对话框并继续处理后续图书
+                        error_dialog(gui, _('Douban metadata'),
+                                     f'Douban update failed for book {book_id}: {e}',
+                                     show=True)
+                    else:
+                        self.info(f'Douban update failed for book {book_id}: {e}')
+        finally:
+            if progress_dlg is not None:
+                progress_dlg.setValue(len(ids))
+                progress_dlg.close()
+            self._silent_mode = False
+
+        if with_check:
+            info_dialog(gui, _('Douban metadata'),
+                        _('豆瓣元数据更新完成。'), show=True)
+        else:
+            self.info(_('豆瓣元数据更新完成。'))
 
     def _update_one_book(self, db_api, book_id,
                          col_key, col_dtype,
@@ -688,21 +739,28 @@ class DoubanAction(InterfaceAction):
         if not default_fields:
             default_fields = all_ids
 
-        self._apply_rating_custom = 'custom_rating' in default_fields
-        self._apply_rating_count_custom = 'custom_rating_count' in default_fields
-        self._apply_translator_custom = 'custom_translator' in default_fields
+        # 每本书使用独立状态，避免批量处理时跨书籍串值
+        apply_rating_custom = 'custom_rating' in default_fields
+        apply_rating_count_custom = 'custom_rating_count' in default_fields
+        apply_translator_custom = 'custom_translator' in default_fields
+        replace_cover = bool(self.prefs.get('replace_cover_by_default', True))
 
         while True:
-            # 1. 让用户调整用于搜索的字段：优先使用 ISBN，其次“书名+作者”，最后仅书名
+            # 1. 组装用于搜索的字段：优先使用 ISBN，其次“书名+作者”，最后仅书名
             if isbn:
                 base_kw = isbn
             elif self.douban_search_with_author and title and authors:
                 base_kw = f'{title} {" ".join(authors)}'
             else:
                 base_kw = title
-            search_keyword = self._ask_search_params(title, authors, isbn, base_kw)
-            if not search_keyword:
-                return  # 用户取消或关闭搜索参数对话框
+
+            if with_check:
+                search_keyword = self._ask_search_params(title, authors, isbn, base_kw)
+                if not search_keyword:
+                    return  # 用户取消或关闭搜索参数对话框
+            else:
+                # 不检查模式：后台静默运行，不弹搜索参数对话框
+                search_keyword = base_kw
 
             # 2. 执行豆瓣搜索
             log = self  # 使用自身作为日志对象，提供 info/error/print 接口
@@ -717,7 +775,7 @@ class DoubanAction(InterfaceAction):
 
             # 3. 可选：弹出检查对话框，显示旧值与新值
             if with_check:
-                action = self._confirm_changes(
+                action, selected, replace_cover = self._confirm_changes(
                     mi, new_mi, db_api, book_id,
                     col_key, col_dtype,
                     col_count_key, col_count_dtype,
@@ -728,6 +786,9 @@ class DoubanAction(InterfaceAction):
                 if action == 'rescan':
                     # 回到 while 顶部，重新调整搜索参数并搜索
                     continue
+                apply_rating_custom = 'custom_rating' in selected
+                apply_rating_count_custom = 'custom_rating_count' in selected
+                apply_translator_custom = 'custom_translator' in selected
             else:
                 # 无检查模式下：仅按默认填充字段覆盖 new_mi
                 selected = default_fields
@@ -752,25 +813,25 @@ class DoubanAction(InterfaceAction):
             # 写入自定义列评分
             rating_val = book.get('rating', None)
             val = self._format_rating_for_datatype(rating_val, col_dtype)
-            if val is not None and getattr(self, '_apply_rating_custom', True):
+            if val is not None and apply_rating_custom:
                 db_api.set_field(col_key, {book_id: val})
 
             # 写入评分人数（如果已配置）
             if col_count_key:
                 count_val = book.get('rating_count', None)
                 v2 = self._format_rating_for_datatype(count_val, col_count_dtype or 'int')
-                if v2 is not None and getattr(self, '_apply_rating_count_custom', True):
+                if v2 is not None and apply_rating_count_custom:
                     db_api.set_field(col_count_key, {book_id: v2})
 
             # 写入译者信息（如果已配置）
-            if col_trans_key and getattr(self, '_apply_translator_custom', True):
+            if col_trans_key and apply_translator_custom:
                 translators = book.get('translators', [])
                 trans_text = ', '.join(translators) if translators else ''
                 if trans_text:
                     db_api.set_field(col_trans_key, {book_id: trans_text})
 
             # 写入封面（如果勾选替换封面）
-            if getattr(self, '_replace_cover', False):
+            if replace_cover:
                 new_cover_url = getattr(new_mi, 'cover', None)
                 if new_cover_url:
                     try:
@@ -792,6 +853,10 @@ class DoubanAction(InterfaceAction):
         搜索前弹出对话框，让用户调整用于搜索的字段，并返回最终搜索关键字。
         返回 None 表示用户取消。
         """
+        # 静默模式兜底：不弹任何对话框，直接使用默认搜索词
+        if getattr(self, '_silent_mode', False):
+            return (default_keyword or title or '').strip() or None
+
         from qt.core import QDialog, QVBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox, QLabel
 
         dlg = QDialog(self.gui)
@@ -1142,8 +1207,8 @@ class DoubanAction(InterfaceAction):
         dlg.exec()
 
         # 根据勾选结果调整 new_mi / 写入自定义列标志
+        selected = set()
         if result['value'] == 'apply':
-            selected = set()
             for i, (fid, _label, _old, _new) in enumerate(rows):
                 item = table.item(i, 0)
                 if item is not None and item.checkState() == Qt.CheckState.Checked:
@@ -1164,20 +1229,12 @@ class DoubanAction(InterfaceAction):
                 new_mi.rating = getattr(old_mi, 'rating', None)
             if 'comments' not in selected:
                 new_mi.comments = getattr(old_mi, 'comments', None)
-
-            # 自定义评分列
-            self._apply_rating_custom = 'custom_rating' in selected
-            # 自定义评分人数列
-            self._apply_rating_count_custom = 'custom_rating_count' in selected
-            # 自定义译者列
-            self._apply_translator_custom = 'custom_translator' in selected
-
             # 封面是否替换由“替换封面”复选框控制
-            self._replace_cover = cb_replace_cover.isChecked()
+            replace_cover = cb_replace_cover.isChecked()
         else:
-            self._replace_cover = False
+            replace_cover = False
 
-        return result['value']
+        return result['value'], selected, replace_cover
 
     # --- 日志兼容方法，供 DoubanBookSearcher / to_metadata 调用 ---
     def info(self, msg, *args, **kwargs):
@@ -1189,7 +1246,11 @@ class DoubanAction(InterfaceAction):
 
     def error(self, msg, *args, **kwargs):
         try:
-            error_dialog(self.gui, _('Douban metadata'), str(msg), show=True)
+            if getattr(self, '_silent_mode', False):
+                # 静默模式下不要弹框，避免打断批量处理
+                self.info(msg)
+            else:
+                error_dialog(self.gui, _('Douban metadata'), str(msg), show=True)
         except Exception:
             pass
 
